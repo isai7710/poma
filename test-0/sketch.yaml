@@ -1,0 +1,2 @@
+default_fqbn: esp32:esp32:adafruit_feather_esp32s3_nopsram
+default_port: /dev/cu.usbmodem11201
