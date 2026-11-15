@@ -4,8 +4,8 @@
 //
 // On boot: restore view_index from NVS and show that poem once the refresh
 // cooldown allows. Then poll three buttons:
-//   A  previous poem   (floor: the first poem)
-//   B  next poem       (ceiling: today's poem, so no peeking ahead)
+//   A  next poem       (ceiling: today's poem, so no peeking ahead)
+//   B  previous poem   (floor: the first poem)
 //   C  back to today
 // A press changes the panel at most once, and never sooner than 180 s after
 // the previous refresh. Presses during the cooldown are dropped, not queued.
@@ -33,8 +33,10 @@
 #define WING_SRAM_CS 6
 
 // Buttons: active LOW, switch to GND, internal pull-ups.
-#define BTN_A 11  // previous poem
-#define BTN_B 12  // next poem
+// A and B are the reverse of HARDWARE.md §7: the device sits the other way
+// round from what that table assumed (rotation 2), so the actions were swapped.
+#define BTN_A 11  // next poem
+#define BTN_B 12  // previous poem
 #define BTN_C 13  // return to today. Shares its pin with LED_BUILTIN.
 
 #define SD_SPI_HZ 4000000  // core default; a poem reads in ~18 ms
@@ -101,7 +103,7 @@ const char *countPoems(int &count) {
 
 // index is 0-based (it is what view_index holds); files are 1-based.
 const char *loadPoem(int index, uint8_t *buf) {
-  char path[4];
+  char path[24];
   snprintf(path, sizeof(path), "/poems/%03d.bin", index + 1);
 
   File f = SD.open(path, FILE_READ);
@@ -195,12 +197,12 @@ void onButton(int pin) {
   int target = viewIndex;
   const char *name = "?";
   if (pin == BTN_A) {
-    name = "A (previous)";
-    target = max(viewIndex - 1, 0);
+    name = "A (next)";
+    target = min(viewIndex + 1, dailyIndex);
   }
   if (pin == BTN_B) {
-    name = "B (next)";
-    target = min(viewIndex + 1, dailyIndex);
+    name = "B (previous)";
+    target = max(viewIndex - 1, 0);
   }
   if (pin == BTN_C) {
     name = "C (today)";
