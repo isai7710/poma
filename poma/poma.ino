@@ -1,6 +1,6 @@
 // poma — Daily Poem E-Paper Device
 //
-// Step 3 of Session 1: buttons and persistent view_index.
+// Step 4 of Session 1: battery check, battery glyph, and the busy light.
 //
 // On boot: restore view_index from NVS and show that poem once the refresh
 // cooldown allows. Then poll three buttons:
@@ -9,6 +9,12 @@
 //   C  back to today
 // A press changes the panel at most once, and never sooner than 180 s after
 // the previous refresh. Presses during the cooldown are dropped, not queued.
+//
+// The NeoPixel is the busy light: dim red while the cooldown is running (a
+// press would be dropped), dark when a press will be accepted.
+//
+// Before every refresh the battery is read. Below 3.4 V the refresh is
+// skipped; otherwise a small battery glyph is drawn top right over the poem.
 //
 // Card requirements:
 //   - FAT32. The ESP32 Arduino core is built without exFAT support, and
@@ -54,6 +60,63 @@ static uint8_t poemBuf[POEM_BYTES];
 // Session 1 only: "today" is hardcoded. The RTC supplies it in Session 2.
 // It is 5 rather than 0 so there are earlier poems to browse back to.
 const int DAY_INDEX = 5;
+
+// --- Battery ----------------------------------------------------------------
+// The Feather carries a MAX17048 fuel gauge on I2C (found at 0x36 by a bus
+// scan). We read two of its registers directly; that is all we need from it,
+// so there is no library. Register layout is from the MAX17048 datasheet:
+//   0x02 VCELL  16 bits, 78.125 uV per count
+//   0x04 SOC    16 bits, 1/256 % per count (so the high byte is whole percent)
+#define FUEL_GAUGE_ADDR 0x36
+#define GAUGE_REG_VCELL 0x02
+#define GAUGE_REG_SOC 0x04
+
+// HARDWARE.md §8: below this, do not refresh. A brownout halfway through the
+// waveform leaves a corrupted image; skipping leaves the last good poem.
+const int BATTERY_MIN_MV = 3400;
+
+struct Battery {
+  bool known;   // false = the gauge did not answer
+  int mv;       // cell voltage in millivolts
+  int percent;  // the gauge's state-of-charge estimate, clamped to 0..100
+};
+
+bool readGauge(uint8_t reg, uint16_t &value) {
+  Wire.beginTransmission(FUEL_GAUGE_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;  // false = keep the bus
+  if (Wire.requestFrom((uint8_t)FUEL_GAUGE_ADDR, (size_t)2) != 2) return false;
+  uint8_t high = Wire.read();  // two statements: the gauge sends the high
+  uint8_t low = Wire.read();   // byte first, and the order must be fixed
+  value = (uint16_t)high << 8 | low;
+  return true;
+}
+
+Battery readBattery() {
+  Battery b = { false, 0, 0 };
+  uint16_t vcell, soc;
+  if (readGauge(GAUGE_REG_VCELL, vcell) && readGauge(GAUGE_REG_SOC, soc)) {
+    b.known = true;
+    b.mv = vcell * 5UL / 64;  // 78.125 uV per count is exactly 5/64 mV
+    b.percent = min(soc >> 8, 100);  // the gauge can report slightly over 100
+  }
+  return b;
+}
+
+// --- Busy light -------------------------------------------------------------
+// The Feather's NeoPixel, at the dimmest level it has. Lit = the cooldown is
+// running. It is lit, rather than dark, during the cooldown because the
+// device is ready almost all day and a NeoPixel costs power only while lit.
+// rgbLedWrite() and PIN_NEOPIXEL come with the ESP32 core; the core also
+// switches the NeoPixel's power pin (GPIO 21) on before setup() runs.
+const uint8_t BUSY_LIGHT_LEVEL = 1;  // 1..255. Raise it if 1 is too dim to see.
+
+void setBusyLight(bool on) {
+  static int8_t shown = -1;  // -1 = not written yet, so the first call writes
+  if (shown == (int8_t)on) return;
+  rgbLedWrite(PIN_NEOPIXEL, on ? BUSY_LIGHT_LEVEL : 0, 0, 0);  // red only
+  shown = on;
+}
 
 // --- Storage ----------------------------------------------------------------
 // Every function here returns nullptr on success or a short message on
@@ -141,6 +204,9 @@ uint32_t cooldownRemainingMs() {
 // caller can break the limit by mistake.
 bool refreshPanel() {
   if (cooldownRemainingMs() > 0) return false;
+  // Light up now, not after: display() blocks for 2.5 s, and this is the
+  // only sign for that long that the press was accepted.
+  setBusyLight(true);
   display.display();  // ~2.5 s: a fixed delay, BUSY is not wired (§4.4)
   lastRefreshMs = millis();
   return true;
@@ -155,16 +221,44 @@ void drawPoem(uint8_t *bitmap) {
   display.drawBitmap(0, 0, bitmap, PANEL_W, PANEL_H, EPD_BLACK);
 }
 
-// Card -> RAM -> panel, for one poem. The card is mounted and released
-// inside this call, so it is never active while the panel is being driven
-// (HARDWARE.md §5).
+// The converter keeps a 16 x 8 px area clear for this, top right. These two
+// numbers must match BATTERY_GLYPH in tools/render_poems.py.
+const int16_t GLYPH_X = 275;
+const int16_t GLYPH_Y = 5;
+
+// Drawn over the poem, in the same coordinates as the bitmap. It is a
+// snapshot: it shows the charge at the moment of this refresh and does not
+// change until the next one. An empty outline means under 10 %.
+void drawBatteryGlyph(const Battery &batt) {
+  if (!batt.known) return;  // no reading: draw nothing rather than a guess
+  display.drawRect(GLYPH_X, GLYPH_Y, 14, 8, EPD_BLACK);          // body
+  display.fillRect(GLYPH_X + 14, GLYPH_Y + 2, 2, 4, EPD_BLACK);  // terminal
+  int16_t fill = batt.percent / 10;  // 0..10 px: one pixel per 10 %
+  if (fill > 0) display.fillRect(GLYPH_X + 2, GLYPH_Y + 2, fill, 4, EPD_BLACK);
+}
+
+// Battery -> card -> RAM -> panel, for one poem. The card is mounted and
+// released inside this call, so it is never active while the panel is being
+// driven (HARDWARE.md §5).
 const char *showPoem(int index) {
-  const char*err = mountCard();
+  Battery batt = readBattery();
+  if (batt.known) {
+    Serial.printf("Battery: %d mV, %d %%\n", batt.mv, batt.percent);
+    if (batt.mv < BATTERY_MIN_MV) return "Battery too low to refresh";
+  } else {
+    // Deliberately not an error: the gauge may not answer with no battery
+    // plugged in, and then we are on USB power, where a brownout is not the
+    // risk. The refresh goes ahead without a glyph.
+    Serial.println("Battery: gauge did not answer, refreshing without a glyph");
+  }
+
+  const char *err = mountCard();
   if (!err) err = loadPoem(index, poemBuf);
   SD.end();
   if (err) return err;
 
   drawPoem(poemBuf);
+  drawBatteryGlyph(batt);
   if (!refreshPanel()) return "Refresh refused";  // callers check the cooldown first
   return nullptr;
 }
@@ -225,49 +319,25 @@ void onButton(int pin) {
   }
 }
 
-// --- Temporary diagnostics (removed in the battery step) --------------------
-// Lists what answers on I2C so we know which fuel gauge this Feather carries
-// before writing battery code against it. Read-only.
-void scanI2C() {
-  Wire.begin();
-  Serial.print("I2C devices:");
-  for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() != 0) continue;
-    const char *name = addr == 0x36   ? " (MAX17048 fuel gauge)"
-                       : addr == 0x0B ? " (LC709203F fuel gauge)"
-                       : addr == 0x68 ? " (DS3231 RTC)"
-                                      : "";
-    Serial.printf(" 0x%02X%s", addr, name);
-  }
-  Serial.println();
-}
-
-// With nothing pressed, every button must read HIGH. Button C is the one to
-// watch: its pin also feeds the on-board LED, which loads the pull-up.
-void reportIdleButtons() {
-  const char *names[] = { "A", "B", "C" };
-  for (int i = 0; i < 3; i++) {
-    int lows = 0;
-    for (int n = 0; n < 50; n++) {
-      if (digitalRead(BUTTONS[i]) == LOW) lows++;
-      delay(2);
-    }
-    Serial.printf("Button %s (GPIO %d) idle: %s\n", names[i], BUTTONS[i],
-                  lows == 0 ? "HIGH, ok" : "reads LOW with nothing pressed - PROBLEM");
-  }
-}
-
 void setup() {
   deselectAll();
   for (uint8_t pin : BUTTONS) pinMode(pin, INPUT_PULLUP);
+  // Dark until we know setup succeeded. Written explicitly because a NeoPixel
+  // can keep its last colour across a reset.
+  setBusyLight(false);
+  Wire.begin();  // for the fuel gauge
 
   Serial.begin(115200);
   // Development only: give the USB serial monitor up to 4 s to attach.
   for (uint32_t t0 = millis(); !Serial && millis() - t0 < 4000;) delay(10);
-  Serial.println("\n--- poma step 3: buttons and NVS ---");
-  scanI2C();
-  reportIdleButtons();
+  Serial.println("\n--- poma step 4: battery and busy light ---");
+
+  Battery batt = readBattery();
+  if (batt.known) {
+    Serial.printf("Battery: %d mV, %d %%\n", batt.mv, batt.percent);
+  } else {
+    Serial.println("Battery: gauge did not answer");
+  }
 
   // How many poems are there? Needed once, to turn the day into an index.
   int count = 0;
@@ -300,6 +370,9 @@ void setup() {
 void loop() {
   delay(20);  // button sampling period; see pollButtons()
   if (!ready) return;
+
+  // Lit for as long as a press would be dropped. Only writes on a change.
+  setBusyLight(cooldownRemainingMs() > 0);
 
   int pin = pollButtons();
   if (pin >= 0) onButton(pin);
