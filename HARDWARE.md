@@ -52,13 +52,22 @@ blits it.
 #define EPD_BUSY  -1    // VERIFIED — not routed on the FeatherWing
 #define EPD_SPI   &SPI
 
+// --- On-wing SRAM chip select (the physical pin; the library is given -1) ---
+#define WING_SRAM_CS 6  // VERIFIED — firmware drives it HIGH at boot. See §5.
+
 // --- Buttons on the FeatherWing (active LOW, switch to GND) ---
-#define BTN_A     11    // Previous poem
-#define BTN_B     12    // Next poem
-#define BTN_C     13    // Return to today
+#define BTN_A     11    // Next poem
+#define BTN_B     12    // Return to today
+#define BTN_C     13    // Previous poem
+
+// --- On the Feather itself (names defined by the ESP32 core) ---
+// PIN_NEOPIXEL    33   // VERIFIED — NeoPixel data. Used as the busy light (§7).
+// NEOPIXEL_POWER  21   // NeoPixel power. The core drives it HIGH before setup().
+// MAX17048 fuel gauge: I2C address 0x36 on SDA 3 / SCL 4. VERIFIED
 
 // --- DS3231 alarm wire (user-soldered or hand wired) ---
-#define RTC_SQW   18    // A0 on the Feather silkscreen. ASSUMED mapping.
+#define RTC_SQW   18    // A0 on the Feather silkscreen. Mapping confirmed in the
+                        // core's pins_arduino.h; not yet exercised on hardware.
 ```
 
 ### Pin notes
@@ -73,8 +82,12 @@ blits it.
   SQW) fall in this range, so they can share one `ext1` wake mask.
 - SPI pins (SCK 36 / MOSI 35 / MISO 37) are outside the RTC range. This is
   fine — they are not wake sources.
-- **VERIFY:** that `A0` maps to GPIO 18 on this board, against the official
-  ESP32-S3 Feather pinout page.
+- **`A0` maps to GPIO 18:** confirmed in the ESP32 core's variant file for this
+  board (`pins_arduino.h`: `A0 = 18`, core 3.3.11). Read from source, not yet
+  exercised on hardware.
+- **The NeoPixel is powered from boot.** The core's `initVariant()` drives
+  `NEOPIXEL_POWER` (GPIO 21) HIGH before `setup()` runs, so the pixel draws its
+  idle current even when dark. This must be switched off before deep sleep.
 
 ---
 
@@ -239,6 +252,12 @@ instead of an SPI transaction (also faster).
 explicitly deselected.** When adding SD support, ensure `SD_CS` is driven HIGH
 when not in use and that the SD library releases the bus before `display()`.
 
+**VERIFIED: the SD card and the panel coexist.** The firmware drives all three
+chip selects HIGH (EPD 9, SD 5, on-wing SRAM 6) before any SPI traffic. For
+each poem it mounts the card, reads the file, and calls `SD.end()` before the
+panel is driven. All 11 test poems read back with matching CRC32s and rendered
+correctly.
+
 ---
 
 ## 6. RTC (DS3231)
@@ -300,9 +319,9 @@ persists in NVS.
 | Event             | Effect                                          |
 | ----------------- | ----------------------------------------------- |
 | RTC alarm (daily) | `view_index = daily_index`, refresh             |
-| Button A          | `view_index--` (floor 0), refresh               |
-| Button B          | `view_index++` (ceiling `daily_index`), refresh |
-| Button C          | `view_index = daily_index`, refresh             |
+| Button A          | `view_index++` (ceiling `daily_index`), refresh |
+| Button B          | `view_index = daily_index`, refresh             |
+| Button C          | `view_index--` (floor 0), refresh               |
 
 The ceiling prevents peeking at future poems. The daily alarm always returns
 to today's poem, so the device self-heals if left on an old one.
@@ -313,9 +332,16 @@ to today's poem, so the device self-heals if left on an old one.
   One button press = one direct action = at most one refresh.
 - **No "new poem available" notification.** Displaying a badge costs exactly
   the same refresh as displaying the poem itself, so it is strictly worse.
-  On e-paper there is no such thing as a cheap visual hint.
+  On the panel there is no such thing as a cheap visual hint. The one
+  exception is the busy light below, which costs no refresh.
 - **Battery indicator is drawn inline** in the poem layout — no button, no
-  extra refresh. The ESP32-S3 Feather has an I²C battery monitor.
+  extra refresh. The Feather's MAX17048 (I²C 0x36) is read before each refresh,
+  so the glyph is a snapshot: it shows the charge at the last refresh and can
+  be up to a day old. An empty outline means under 10%.
+- **Busy light.** The Feather's NeoPixel is dim red while the 180s cooldown is
+  running (a press would be dropped) and dark otherwise. It is lit during the
+  cooldown rather than when ready because the device is ready almost all day,
+  and the light should be dark for almost all of it.
 - Deep browsing is not viable: the 180s cooldown means 5 presses = 15 minutes.
   Browsing is realistically for "what was yesterday's?"
 
@@ -344,8 +370,13 @@ RTC_DATA_ATTR uint64_t last_refresh_us = 0;
 ```
 
 On wake, if under 180s since the last refresh, sleep again without refreshing.
-A too-soon press produces no visible feedback — this is accepted, since
-feedback would itself require a refresh.
+A too-soon press changes nothing on the panel, since feedback there would
+itself require a refresh. The busy light is the feedback instead: lit means a
+press will be dropped.
+
+**Session 2:** the flow above sleeps straight away, but something has to switch
+the busy light off 180s after a refresh. That needs a timer wake, or staying
+awake for the cooldown. Not yet designed.
 
 **VERIFY:** that `esp_timer_get_time()` keeps counting across deep sleep on the
 ESP32-S3. Cheap test: sleep 10s, wake, print it.
@@ -367,7 +398,10 @@ ESP32-S3. Cheap test: sleep 10s, wake, print it.
   is already set, sleep without refreshing — one error refresh, not a loop.
 - **Check battery voltage before any refresh.** Below ~3.4V, skip the refresh
   and sleep. A brownout mid-waveform freezes particles in transit, leaving a
-  corrupted image until the next successful refresh.
+  corrupted image until the next successful refresh. IMPLEMENTED: the cutoff
+  is 3400 mV, read from the MAX17048. If the gauge does not answer, the
+  refresh goes ahead without a battery glyph — the gauge may be silent with no
+  battery connected, and the device is then on USB power.
 - Because e-paper is bistable, "do nothing" leaves the last good poem visible
   indefinitely. The device degrades into a static page rather than a corrupted
   one. **Design for this — it is the best property of the technology.**
@@ -398,24 +432,35 @@ signature.
 4. Trigger update — charge pump on, waveform clocked out through source/gate
    drivers. **This is where all the time and current go.**
 5. Wait for busy — polls the BUSY pin, or (here) sleeps a fixed delay.
-6. Power down — controller deep-sleep command, charge pump off.
+6. Power down — **does not happen with this wiring.** `display()` defaults to
+   `sleep = false`, so the controller is left as it is after the refresh.
+   `display(true)` calls `powerDown()`, but the driver only sends the
+   deep-sleep command when it has a reset pin to wake the controller with.
+   With `EPD_RESET` at -1 it sends a software reset instead (Adafruit_EPD
+   4.6.13, `Adafruit_SSD1680::powerDown()`). Read from source; the controller's
+   idle current afterwards is unmeasured.
 
 ---
 
 ## 10. Open Items / To Verify
 
-| Item                                                   | Status                        |
-| ------------------------------------------------------ | ----------------------------- |
-| `A0` → GPIO 18 mapping on ESP32-S3 Feather             | ASSUMED                       |
-| `SD_CS` = 5 correct on this board                      | ASSUMED, untested             |
-| SD + EPD coexisting while both in active use           | UNTESTED                      |
-| Deep-sleep wake with `EPD_RESET` tied to Feather reset | UNTESTED                      |
-| Pull-up behavior on wake pins during deep sleep        | UNTESTED — measure over hours |
-| `esp_timer_get_time()` persistence across deep sleep   | UNVERIFIED                    |
-| SQW pull-up present on Adafruit DS3231 breakout        | UNVERIFIED                    |
-| Actual deep-sleep current                              | UNMEASURED                    |
-| `drawBitmap` RAM vs PROGMEM overload                   | UNVERIFIED                    |
-| Wiring the BUSY pad to reduce awake time               | NOT DONE — optimization       |
+| Item                                                   | Status                             |
+| ------------------------------------------------------ | ---------------------------------- |
+| `A0` → GPIO 18 mapping on ESP32-S3 Feather             | CONFIRMED in source, not exercised |
+| `SD_CS` = 5 correct on this board                      | VERIFIED                           |
+| SD + EPD coexisting while both in active use           | VERIFIED                           |
+| Deep-sleep wake with `EPD_RESET` tied to Feather reset | UNTESTED                           |
+| Pull-up behavior on wake pins during deep sleep        | UNTESTED — measure over hours      |
+| `esp_timer_get_time()` persistence across deep sleep   | UNVERIFIED                         |
+| SQW pull-up present on Adafruit DS3231 breakout        | UNVERIFIED                         |
+| Actual deep-sleep current                              | UNMEASURED                         |
+| `drawBitmap` RAM vs PROGMEM overload                   | VERIFIED                           |
+| Wiring the BUSY pad to reduce awake time               | NOT DONE — optimization            |
+| Panel controller not powered down after `display()`    | UNMEASURED — see §9, Session 2     |
+| SD card idle current (no power switch on the wing)     | UNMEASURED — Session 2             |
+| NeoPixel power (GPIO 21) off during deep sleep         | NOT DONE — Session 2               |
+| Busy light switched off 180s after a refresh           | NOT DESIGNED — see §7, Session 2   |
+| MAX17048 percent reported at the 3.4V cutoff           | UNMEASURED                         |
 
 ---
 
