@@ -21,14 +21,14 @@ blits it.
 
 ## 2. Hardware Inventory
 
-| Component | Product                                            | Link                                  |
-| --------- | -------------------------------------------------- | ------------------------------------- |
-| MCU       | Adafruit Feather ESP32-S3 (8MB Flash with w.FL)    | https://www.adafruit.com/product/5885 |
-| Display   | Adafruit 2.9" Grayscale eInk FeatherWing (SSD1680) | https://www.adafruit.com/product/4777 |
-| RTC       | Adafruit DS3231 Precision RTC - STEMMA QT          | https://www.adafruit.com/product/5188 |
-| Battery   | LiPo (3.7V 1200mAh)                                | https://www.adafruit.com/product/258  |
-| Coin cell | CR1220 (RTC backup, **not included with RTC**)     | -                                     |
-| Storage   | microSD card (tested: Micron 64GB)                 | -                                     |
+| Component | Product                                                                       | Link                                  |
+| --------- | ----------------------------------------------------------------------------- | ------------------------------------- |
+| MCU       | Adafruit Feather ESP32-S3 (8MB Flash with w.FL, has MAX17048 battery monitor) | https://www.adafruit.com/product/5885 |
+| Display   | Adafruit 2.9" Grayscale eInk FeatherWing (SSD1680)                            | https://www.adafruit.com/product/4777 |
+| RTC       | Adafruit DS3231 Precision RTC - STEMMA QT                                     | https://www.adafruit.com/product/5188 |
+| Battery   | LiPo (3.7V 1200mAh)                                                           | https://www.adafruit.com/product/258  |
+| Coin cell | CR1220 (RTC backup, **not included with RTC**)                                | -                                     |
+| Storage   | microSD card (must be FAT32)                                                  | -                                     |
 
 ### Reference documentation
 
@@ -46,7 +46,7 @@ blits it.
 // --- eInk FeatherWing (fixed by PCB traces) ---
 #define EPD_CS     9    // VERIFIED
 #define EPD_DC    10    // VERIFIED
-#define SD_CS      5    // ASSUMED (not yet exercised)
+#define SD_CS      5    // VERIFIED
 #define SRAM_CS   -1    // VERIFIED — deliberately NOT 6. See §5.
 #define EPD_RESET -1    // VERIFIED — tied to Feather RESET, not separately routed
 #define EPD_BUSY  -1    // VERIFIED — not routed on the FeatherWing
@@ -67,8 +67,8 @@ blits it.
   `examples/FeatherWingGray4/FeatherWingGray4.ino`. `ESP32` is very likely
   defined for the ESP32-S3 as well, which would select pins 32/15/33 intended
   for the classic ESP32 Feather. Use the explicit defines above.
-- **GPIO 13 may be shared with `LED_BUILTIN`** on Feather boards. Usually
-  harmless but worth knowing before debugging a phantom button press.
+- **GPIO 13 is shared with `LED_BUILTIN`** on Feather boards. I removed the LED
+  with a soldering iron.
 - **ESP32-S3 RTC-capable GPIOs are 0–21.** All four wake sources (3 buttons +
   SQW) fall in this range, so they can share one `ext1` wake mask.
 - SPI pins (SCK 36 / MOSI 35 / MISO 37) are outside the RTC range. This is
@@ -213,7 +213,7 @@ Bitmap format: **296 / 8 = 37 bytes per row exactly** (no padding),
 37 x 128 = **4,736 bytes per image**. MSB = leftmost pixel, 1 = black,
 row-major, top to bottom. This matches `drawBitmap()`'s expected layout.
 
-**VERIFY:** GFX has both PROGMEM and RAM overloads of `drawBitmap`. The RAM
+GFX has both PROGMEM and RAM overloads of `drawBitmap`. The RAM
 overload (`uint8_t *bitmap`) is the one needed here.
 
 ---
@@ -288,9 +288,9 @@ watching, avoids changeover while reading).
 
 | Button | GPIO | Action          |
 | ------ | ---- | --------------- |
-| A      | 11   | Previous poem   |
-| B      | 12   | Next poem       |
-| C      | 13   | Return to today |
+| A      | 11   | Next poem       |
+| B      | 12   | Return to today |
+| C      | 13   | Previous poem   |
 
 ### State model
 
