@@ -394,12 +394,17 @@ ESP32-S3. Cheap test: sleep 10s, wake, print it.
 ### Failure handling
 
 - On failure (no card, missing directory, missing file, wrong file size):
-  render a minimal single-line GFX error screen, set a flag in NVS. If the flag
-  is already set, sleep without refreshing — one error refresh, not a loop.
+  render a minimal single-line GFX error screen and record it in NVS. If it is
+  already recorded, sleep without refreshing — one error refresh, not a loop.
+  IMPLEMENTED and VERIFIED: the firmware stores the error message itself (key
+  `error`), not a bare flag, so a different failure replaces a stale message.
+  The record is written after the refresh and cleared when a poem is shown.
+  The 180 s cooldown and the battery cutoff apply to the error screen too.
 - **Check battery voltage before any refresh.** Below ~3.4V, skip the refresh
   and sleep. A brownout mid-waveform freezes particles in transit, leaving a
-  corrupted image until the next successful refresh. IMPLEMENTED: the cutoff
-  is 3400 mV, read from the MAX17048. If the gauge does not answer, the
+  corrupted image until the next successful refresh. IMPLEMENTED and VERIFIED
+  (tested by raising the cutoff above the battery voltage): the cutoff is
+  3400 mV, read from the MAX17048. If the gauge does not answer, the
   refresh goes ahead without a battery glyph — the gauge may be silent with no
   battery connected, and the device is then on USB power.
 - Because e-paper is bistable, "do nothing" leaves the last good poem visible
