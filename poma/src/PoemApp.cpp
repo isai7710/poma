@@ -16,29 +16,33 @@ const int BATTERY_MIN_MV = 3400;
 
 // How often the buttons are sampled. This period is the debounce: see Buttons.
 const uint32_t BUTTON_SAMPLE_MS = 20;
+
+const char *const NVS_NAMESPACE = "poma";
 }  // namespace
 
-// The wiring: which pin and which bus each part is given.
+// The wiring: which pin, bus and storage each part is given.
 PoemApp::PoemApp()
   : gauge_(Wire, board::FUEL_GAUGE_ADDR),
     light_(board::NEOPIXEL),
     library_(board::SD_CS, SPI),
     display_(board::EPD_DC, board::EPD_RESET, board::EPD_CS, board::EPD_SRAM_CS,
              board::EPD_BUSY, SPI),
-    buttons_(board::BTN_A, board::BTN_B, board::BTN_C) {}
+    buttons_(board::BTN_A, board::BTN_B, board::BTN_C),
+    state_(prefs_),
+    errors_(prefs_) {}
 
 void PoemApp::begin() {
   board::deselectSpiDevices();
   buttons_.begin();
-  // Dark until we know begin() succeeded. Written explicitly because a
-  // NeoPixel can keep its last colour across a reset.
+  // Written explicitly because a NeoPixel can keep its last colour across a
+  // reset. update() takes it over from here.
   light_.set(false);
   Wire.begin();  // for the fuel gauge
 
   Serial.begin(115200);
   // Development only: give the USB serial monitor up to 4 s to attach.
   for (uint32_t t0 = millis(); !Serial && millis() - t0 < 4000;) delay(10);
-  Serial.println("\n--- poma step 4: battery and busy light ---");
+  Serial.println("\n--- poma step 5: error screen ---");
 
   BatteryReading battery = gauge_.read();
   if (battery.known) {
@@ -47,49 +51,46 @@ void PoemApp::begin() {
     Serial.println("Battery: gauge did not answer");
   }
 
+  prefs_.begin(NVS_NAMESPACE);
+  errors_.begin();
+  if (errors_.showing()) Serial.println("The panel is showing an error screen from an earlier run.");
+
+  // begin() talks to the controller but does not refresh. It runs even if
+  // the card turns out to be bad, because the error screen needs the panel.
+  display_.begin();
+
   // How many poems are there? Needed once, to turn the day into an index.
   int count = 0;
-  const char *err = library_.count(count);
-  if (err) {
-    // Leaving the panel alone keeps the last good poem on it (§8).
-    Serial.printf("ERROR: %s. Panel left untouched.\n", err);
-    return;
+  startupError_ = library_.count(count);
+  if (startupError_) {
+    Serial.printf("ERROR: %s. Buttons are off until the next reset.\n", startupError_);
+  } else {
+    state_.begin(DAY_INDEX % count);
+    Serial.printf("%d poems. Today is poem %d. Restored view: poem %d.\n", count,
+                  state_.dailyIndex() + 1, state_.viewIndex() + 1);
   }
-
-  state_.begin(DAY_INDEX % count);
-  Serial.printf("%d poems. Today is poem %d. Restored view: poem %d.\n", count,
-                state_.dailyIndex() + 1, state_.viewIndex() + 1);
-
-  display_.begin();
 
   Serial.printf("First refresh in %lu s (boot counts as a refresh).\n",
                 (unsigned long)(display_.cooldownRemainingMs() + 999) / 1000);
-  ready_ = true;
 }
 
 void PoemApp::update() {
   delay(BUTTON_SAMPLE_MS);
-  if (!ready_) return;
 
-  // Lit for as long as a press would be dropped.
+  // Lit for as long as the cooldown is running.
   light_.set(!display_.canRefresh());
 
-  Button button = buttons_.poll();
-  if (button != Button::None) onButton(button);
+  if (!startupError_) {
+    Button button = buttons_.poll();
+    if (button != Button::None) onButton(button);
+  }
 
   // The single place a refresh is started. PoemDisplay enforces the cooldown
   // again on its own; checking here just avoids touching the card for a
   // refresh that would be refused.
   if (needsRefresh_ && display_.canRefresh()) {
     needsRefresh_ = false;  // one attempt per request, even if it fails
-    uint32_t t0 = millis();
-    const char *err = showPoem(state_.viewIndex());
-    if (err) {
-      Serial.printf("ERROR: %s. Panel left untouched.\n", err);
-    } else {
-      Serial.printf("Showing poem %d (%lu ms). Next refresh allowed in 180 s.\n",
-                    state_.viewIndex() + 1, millis() - t0);
-    }
+    refreshPanel();
   }
 }
 
@@ -114,7 +115,11 @@ void PoemApp::onButton(Button button) {
       return;
   }
 
-  if (target == state_.viewIndex()) {
+  // If an error screen is up, the panel is not showing the poem view_index
+  // says it is, so a press is a retry even when the index does not change.
+  bool alreadyShown = target == state_.viewIndex() && !errors_.showing();
+
+  if (alreadyShown) {
     // Already at the floor, the ceiling, or today. No change, so no refresh.
     Serial.printf("Button %s: already there, nothing to do\n", name);
   } else if (uint32_t ms = display_.cooldownRemainingMs()) {
@@ -124,16 +129,23 @@ void PoemApp::onButton(Button button) {
                   (unsigned long)(ms + 999) / 1000);
   } else {
     Serial.printf("Button %s: poem %d -> %d\n", name, state_.viewIndex() + 1, target + 1);
-    state_.moveTo(target);
+    if (target != state_.viewIndex()) state_.moveTo(target);
     needsRefresh_ = true;
   }
 }
 
-const char *PoemApp::showPoem(int index) {
+void PoemApp::refreshPanel() {
+  uint32_t t0 = millis();
+
+  // The battery check comes first and covers the error screen too: an error
+  // screen is a refresh like any other, and a brownout would corrupt it.
   BatteryReading battery = gauge_.read();
   if (battery.known) {
     Serial.printf("Battery: %d mV, %d %%\n", battery.mv, battery.percent);
-    if (battery.mv < BATTERY_MIN_MV) return "Battery too low to refresh";
+    if (battery.mv < BATTERY_MIN_MV) {
+      Serial.println("Battery too low to refresh. Panel left untouched.");
+      return;
+    }
   } else {
     // Deliberately not an error: the gauge may not answer with no battery
     // plugged in, and then we are on USB power, where a brownout is not the
@@ -141,15 +153,40 @@ const char *PoemApp::showPoem(int index) {
     Serial.println("Battery: gauge did not answer, refreshing without a glyph");
   }
 
-  const char *err = library_.load(index, bitmap_);
-  if (err) return err;
+  const char *err = startupError_;
+  if (!err) err = library_.load(state_.viewIndex(), bitmap_);
 
-  display_.drawPoem(bitmap_);
-  display_.drawBatteryGlyph(battery);
+  if (!err) {
+    display_.drawPoem(bitmap_);
+    display_.drawBatteryGlyph(battery);
+    if (!pushToPanel()) return;
+    errors_.clear();
+    Serial.printf("Showing poem %d (%lu ms). Next refresh allowed in 180 s.\n",
+                  state_.viewIndex() + 1, millis() - t0);
+    return;
+  }
 
+  // The card failed (HARDWARE.md §8). One error refresh, not a loop: if this
+  // message is already on the panel, leave it there.
+  if (errors_.isShowing(err)) {
+    Serial.printf("ERROR: %s. Already on the panel, so it is left untouched.\n", err);
+    return;
+  }
+  display_.drawError(err);
+  if (!pushToPanel()) return;
+  // Recorded after the refresh, not before: if power is lost in between, the
+  // cost is one repeated error refresh rather than an error never shown.
+  errors_.set(err);
+  Serial.printf("ERROR: %s. Error screen shown (%lu ms).\n", err, millis() - t0);
+}
+
+bool PoemApp::pushToPanel() {
+  if (!display_.canRefresh()) {
+    Serial.println("Refresh refused: cooldown still running.");  // update() checks first
+    return false;
+  }
   // The light comes on now, not after: refresh() blocks for 2.5 s, and this
   // is the only sign for that long that the press was accepted.
-  if (display_.canRefresh()) light_.set(true);
-  if (!display_.refresh()) return "Refresh refused";  // update() checks the cooldown first
-  return nullptr;
+  light_.set(true);
+  return display_.refresh();
 }

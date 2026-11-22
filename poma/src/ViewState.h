@@ -14,9 +14,12 @@
 
 class ViewState {
 public:
-  // Opens NVS and restores the saved view. On the first boot ever there is no
-  // saved value, so the view starts on today's poem. A saved value that is
-  // out of range for the card now inserted is clamped.
+  // The caller owns the NVS handle and must have opened it before begin().
+  explicit ViewState(Preferences &prefs);
+
+  // Restores the saved view. On the first boot ever there is no saved value,
+  // so the view starts on today's poem. A saved value that is out of range
+  // for the card now inserted is clamped.
   void begin(int dailyIndex);
 
   int dailyIndex() const {
@@ -35,7 +38,7 @@ public:
   void moveTo(int index);
 
 private:
-  Preferences prefs_;
+  Preferences &prefs_;
   int dailyIndex_ = 0;
   int viewIndex_ = 0;
 };

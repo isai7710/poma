@@ -1,13 +1,14 @@
 #include "ViewState.h"
 
 namespace {
-const char *const NVS_NAMESPACE = "poma";
 const char *const NVS_KEY_VIEW = "view";
 }  // namespace
 
+ViewState::ViewState(Preferences &prefs)
+  : prefs_(prefs) {}
+
 void ViewState::begin(int dailyIndex) {
   dailyIndex_ = dailyIndex;
-  prefs_.begin(NVS_NAMESPACE);
   viewIndex_ = constrain(prefs_.getInt(NVS_KEY_VIEW, dailyIndex_), 0, dailyIndex_);
 }
 

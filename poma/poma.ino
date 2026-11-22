@@ -17,6 +17,10 @@
 // Before every refresh the battery is read. Below 3.4 V the refresh is
 // skipped; otherwise a small battery glyph is drawn top right over the poem.
 //
+// If the card fails (missing, no /poems folder, bad file) a one-line error
+// screen replaces the poem. Each failure gets one error refresh, not a loop:
+// the message on the panel is remembered in NVS and not drawn again.
+//
 // The code lives in src/, one class per part:
 //   PoemApp          the behaviour: ties the parts below together
 //   PoemDisplay      the e-paper panel, and the only caller of display()
@@ -24,6 +28,7 @@
 //   PoemLibrary      the poems on the SD card (read-only)
 //   PoemBitmap       the 4736-byte bitmap format
 //   ViewState        daily_index and view_index, persisted in NVS
+//   ErrorRecord      which error message is on the panel, persisted in NVS
 //   Buttons          the three buttons, polled and debounced
 //   FuelGauge        the MAX17048 battery monitor
 //   BusyLight        the NeoPixel

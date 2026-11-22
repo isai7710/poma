@@ -34,6 +34,19 @@ void PoemDisplay::drawBatteryGlyph(const BatteryReading &battery) {
   if (fill > 0) panel_.fillRect(GLYPH_X + 2, GLYPH_Y + 2, fill, 4, EPD_BLACK);
 }
 
+void PoemDisplay::drawError(const char *message) {
+  panel_.clearBuffer();
+  panel_.setTextSize(2);  // GFX's built-in 6 x 8 font, doubled
+  panel_.setTextColor(EPD_BLACK);
+  panel_.setTextWrap(false);
+
+  int16_t x, y;
+  uint16_t w, h;
+  panel_.getTextBounds(message, 0, 0, &x, &y, &w, &h);
+  panel_.setCursor((panel_.width() - w) / 2, (panel_.height() - h) / 2);
+  panel_.print(message);
+}
+
 bool PoemDisplay::refresh() {
   if (!canRefresh()) return false;
   panel_.display();  // ~2.5 s: a fixed delay, BUSY is not wired (§4.4)

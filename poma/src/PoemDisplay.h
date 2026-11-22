@@ -35,6 +35,11 @@ public:
   // Draws nothing if the reading is unknown, rather than a guess.
   void drawBatteryGlyph(const BatteryReading &battery);
 
+  // Clears the framebuffer and draws one centred line of text, in place of a
+  // poem (HARDWARE.md §8). At 12 px per character the panel holds 24
+  // characters; anything longer runs off the edge.
+  void drawError(const char *message);
+
   // Pushes the framebuffer to the panel. Blocks for ~2.5 s. Returns false,
   // having done nothing, if the cooldown is still running.
   bool refresh();
